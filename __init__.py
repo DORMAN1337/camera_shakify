@@ -145,6 +145,8 @@ class CameraShakifyPanel(bpy.types.Panel):
             col.separator()
             col.operator("object.camera_shakes_fix_global")
             col.operator("wm.camera_shakify_prep_file_for_farm")
+            col.separator()
+            col.operator("wm.camera_shakify_uninstall", icon='CANCEL', text="Uninstall Shakify")
 
 
 class OBJECT_UL_camera_shake_items(bpy.types.UIList):

@@ -666,6 +666,31 @@ class CameraShakifyPrepFileForFarm(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class CameraShakifyUninstall(bpy.types.Operator):
+    """Remove all shake data from the current file and delete the addon"""
+    bl_idname = "wm.camera_shakify_uninstall"
+    bl_label = "Uninstall Shakify"
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        import shutil
+        addon_dir = os.path.dirname(__file__)
+        # Clean up shakes from current scene
+        fix_camera_shakes_globally(context)
+        # Delete the addon folder
+        if os.path.isdir(addon_dir):
+            shutil.rmtree(addon_dir)
+        self.report({'INFO'}, f"Shakify removed. Save and restart Blender.")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+
 class CameraShakifyImportCOLMAP(bpy.types.Operator):
     """Import COLMAP reconstruction as a new shake preset"""
     bl_idname = "wm.camera_shakify_import_colmap"

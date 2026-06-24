@@ -8,7 +8,7 @@ maintainer = "Nathan Vegadahl <cessen@cessen.com>"
 type = "add-on"
 
 # Optional link to documentation, support, source files, etc
-website = "https://github.com/EatTheFuture/camera_shakify/"
+website = "https://github.com/DORMAN1337/camera_shakify"
 
 # Optional list defined by Blender and server, see:
 # https://docs.blender.org/manual/en/dev/advanced/extensions/tags.html

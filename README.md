@@ -13,10 +13,12 @@ A modified version of [Camera Shakify](https://github.com/EatTheFuture/camera_sh
 
 Original addon by [Nathan Vegdahl (cessen)](https://github.com/cessen) and [Ian Hubert](https://twitter.com/Mrdodobird).
 
-This version was completely vibe-coded, so sorry in advance if it destroys your project.
-
 ## License
 
 The code in this addon is licensed under the GNU General Public License, version 3.  See LICENSE_CODE.md for details.
 
 The camera shake data is [CC0](https://creativecommons.org/publicdomain/zero/1.0/).  See LICENSE_DATA.md for details.
+
+---
+
+This version was completely vibe-coded, so sorry in advance if it destroys your project.

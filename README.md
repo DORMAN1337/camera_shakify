@@ -7,7 +7,7 @@ A modified version of [Camera Shakify](https://github.com/EatTheFuture/camera_sh
 - **Import shakes from COLMAP / GLOMAP** — add new presets directly from camera tracking data
 - **Rename or delete** custom presets in the addon properties
 - **Toggle location / rotation** independently per shake
-- **Loop Range** — seamlessly loop camera shake within your scene frame range, so it wraps cleanly when animation restarts
+- **Loop Range** — seamlessly loop camera shake within your scene frame range.
 
 ## Credits
 

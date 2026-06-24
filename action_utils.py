@@ -93,10 +93,10 @@ def ensure_shake_in_action(shake_name, action: Action, data, rot_factor=1.0, loc
         slot = action.slots.new('OBJECT', shake_name)
     assert(slot.identifier == slot_identifier)
 
-    # If there's already a channelbag for the slot, we assume it's filled with
-    # the correct shake animation.
-    if action.layers[0].strips[0].channelbag(slot) != None:
-        return slot
+    # Remove existing channelbag if present, so we always rebuild with fresh data.
+    cb = action.layers[0].strips[0].channelbag(slot)
+    if cb is not None:
+        action.layers[0].strips[0].channelbags.remove(cb)
 
     # Create channelbag and fill it in with the shake data.
     channelbag = action.layers[0].strips[0].channelbags.new(slot)
@@ -109,11 +109,14 @@ def ensure_shake_in_action(shake_name, action: Action, data, rot_factor=1.0, loc
                 co[1] *= rot_factor
             if k[0].startswith("location"):
                 co[1] *= loc_factor
-
             curve.keyframe_points[i].co = co
-            curve.keyframe_points[i].handle_left_type = 'AUTO'
-            curve.keyframe_points[i].handle_right_type = 'AUTO'
-        curve.keyframe_points[-1].co[1] = curve.keyframe_points[0].co[1] # Ensure looping.
+        # Ensure last frame matches first for seamless looping
+        curve.keyframe_points[-1].co[1] = curve.keyframe_points[0].co[1]
+        # Set handles after all values are final so AUTO computes correctly
+        nk = len(curve.keyframe_points)
+        for i in range(nk):
+            curve.keyframe_points[i].handle_left_type = 'AUTO_CLAMPED'
+            curve.keyframe_points[i].handle_right_type = 'AUTO_CLAMPED'
         curve.modifiers.new('CYCLES')
         curve.update()
 

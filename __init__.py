@@ -29,11 +29,18 @@ bl_info = {
 
 import re
 import math
+import os
+import json
 
 import bpy
 from bpy.types import Camera, Context
 from .action_utils import action_to_python_data_text, ensure_shake_in_action, action_slot_frame_range, ensure_action
-from .shake_data import SHAKE_LIST
+from .shake_data import (
+    SHAKE_LIST, BUILTIN_KEYS,
+    get_all_presets, add_user_preset, remove_user_preset,
+    is_builtin, load_user_presets,
+    get_display_name, set_display_name, reset_display_names,
+)
 from .farm_script import ensure_farm_script
 
 
@@ -108,12 +115,18 @@ class CameraShakifyPanel(bpy.types.Panel):
             col.separator()
             col.prop(shake, "scale")
             col.separator()
+            col.prop(shake, "use_location")
+            col.prop(shake, "use_rotation")
+            col.separator()
             col.prop(shake, "use_manual_timing")
             if shake.use_manual_timing:
                 col.prop(shake, "time")
             else:
                 col.prop(shake, "speed")
                 col.prop(shake, "offset")
+            col.separator()
+            col.prop(shake, "use_loop_range")
+            col.separator()
 
         col.separator(factor=2.0)
 
@@ -128,6 +141,8 @@ class CameraShakifyPanel(bpy.types.Panel):
 
         col = layout.column()
         if wm.camera_shake_show_utils:
+            col.operator("wm.camera_shakify_import_colmap", icon='IMPORT')
+            col.separator()
             col.operator("object.camera_shakes_fix_global")
             col.operator("wm.camera_shakify_prep_file_for_farm")
 
@@ -139,7 +154,7 @@ class OBJECT_UL_camera_shake_items(bpy.types.UIList):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             col = layout.column()
             col.label(
-                text=str(item.shake_type).replace("_", " ").title(),
+                text=get_display_name(item.shake_type),
                 icon='FCURVE_SNAPSHOT',
             )
 
@@ -154,26 +169,67 @@ class OBJECT_UL_camera_shake_items(bpy.types.UIList):
 
 #========================================================
 
+def loopify_data(data, scene_len, blend_ratio=0.15):
+    """Truncate to scene_len frames, crossfade the last N% toward vals[0].
+    Returns scene_len keyframes where last ≈ first for seamless loop.
+    blend_ratio defaults to 0.15 (15% of scene_len)."""
+    blend_count = max(1, min(int(scene_len * blend_ratio), scene_len - 1))
+    result = {}
+    for channel, keyframes in data.items():
+        keyframes.sort(key=lambda x: x[0])
+        vals = [v for _, v in keyframes]
+        shake_len = len(vals)
+        if shake_len < 2:
+            wrapped = [vals[i % shake_len] for i in range(scene_len)]
+            result[channel] = [[j, v] for j, v in enumerate(wrapped)]
+            continue
+        # Apply loop_fix on raw data so pre-loop target for last frame = vals[0]
+        vals[-1] = vals[0]
+        # Wrap shake data to fill scene range
+        scene_vals = [vals[i % shake_len] for i in range(scene_len)]
+        orig_vals = list(scene_vals)
+        # Crossfade last blend_count frames toward the frame that precedes
+        # keyframe[0] in the circular shake (shake_len - blend_count + i)
+        for i in range(blend_count):
+            idx = scene_len - blend_count + i
+            t = (i + 1) / blend_count
+            cos_t = (1 - math.cos(t * math.pi)) / 2
+            pre_loop = (shake_len - blend_count + i) % shake_len
+            scene_vals[idx] = (1 - cos_t) * orig_vals[idx] + cos_t * vals[pre_loop]
+        # last frame after crossfade = vals[shake_len-1] = vals[0] (loop_fix)
+        result[channel] = [[j, v] for j, v in enumerate(scene_vals)]
+    return result
+
+
 # Creates a camera shake setup for the given camera and
 # shake item index, using the given collection to store
 # shake empties.
 def build_single_shake(camera, shake_item_index, collection, context):
     shake = camera.camera_shakes[shake_item_index]
-    shake_data = SHAKE_LIST[shake.shake_type]
+    presets = get_all_presets()
+    shake_data = presets[shake.shake_type]
 
     shake_name = shake.shake_type.lower()
     shake_object_name = BASE_NAME + "_" + camera.name + "_" + str(shake_item_index)
+
+    # Build channel data.
+    channels = dict(shake_data[2])
+
+    # Crossfade shake tail into head for seamless loop at scene range.
+    if shake.use_loop_range:
+        scene_len = context.scene.frame_end - context.scene.frame_start + 1
+        if scene_len >= 2:
+            channels = loopify_data(channels, scene_len)
 
     # Ensure the needed action and shake slot exist.
     action = ensure_action(ACTION_NAME)
     slot = ensure_shake_in_action(
         shake_name,
         action,
-        shake_data[2],
+        channels,
         INFLUENCE_MAX,
         INFLUENCE_MAX * SCALE_MAX * UNIT_SCALE_MAX
     )
-
     # Ensure the needed shake object exists.
     shake_object = None
     if shake_object_name in bpy.data.objects:
@@ -209,7 +265,7 @@ def build_single_shake(camera, shake_item_index, collection, context):
     # Get action info for calculations below.
     shake_fps = shake_data[1]
     shake_range = action_slot_frame_range(action, slot)
-    shake_length = shake_range[1] - shake_range[0]
+    shake_length = shake_range[1] - shake_range[0] + 1
 
     # Create the action constraint.
     constraint = shake_object.constraints.new('ACTION')
@@ -218,15 +274,16 @@ def build_single_shake(camera, shake_item_index, collection, context):
     constraint.action = action
     constraint.action_slot = slot
     constraint.frame_start = shake_range[0]
-    constraint.frame_end = shake_range[1]
+    constraint.frame_end = shake_range[1] + 1
 
     # Create the driver for the constraint's eval time.
     driver = constraint.driver_add("eval_time").driver
     driver.type = 'SCRIPTED'
     fps_factor = 1.0 / ((context.scene.render.fps / context.scene.render.fps_base) / shake_fps)
-    driver.expression = \
-        "((time if manual else ((-frame_offset + frame) * speed)) * {}) % 1.0" \
-        .format(fps_factor / shake_length)
+    rate = fps_factor / shake_length
+    norm_expr = "((time if manual else ((-frame_offset + frame) * speed)) * {}) % 1.0".format(rate)
+    loop_expr = "((time if manual else ((frame - scene_start + frame_offset) * speed)) / (scene_end - scene_start + 1)) % 1.0"
+    driver.expression = "{} if use_loop_range else {}".format(loop_expr, norm_expr)
 
     manual_timing_var = driver.variables.new()
     manual_timing_var.name = "manual"
@@ -255,6 +312,27 @@ def build_single_shake(camera, shake_item_index, collection, context):
     offset_var.targets[0].id_type = 'OBJECT'
     offset_var.targets[0].id = camera
     offset_var.targets[0].data_path = 'camera_shakes[{}].offset'.format(shake_item_index)
+
+    loop_var = driver.variables.new()
+    loop_var.name = "use_loop_range"
+    loop_var.type = 'SINGLE_PROP'
+    loop_var.targets[0].id_type = 'OBJECT'
+    loop_var.targets[0].id = camera
+    loop_var.targets[0].data_path = 'camera_shakes[{}].use_loop_range'.format(shake_item_index)
+
+    scene_start_var = driver.variables.new()
+    scene_start_var.name = "scene_start"
+    scene_start_var.type = 'SINGLE_PROP'
+    scene_start_var.targets[0].id_type = 'SCENE'
+    scene_start_var.targets[0].id = context.scene
+    scene_start_var.targets[0].data_path = 'frame_start'
+
+    scene_end_var = driver.variables.new()
+    scene_end_var.name = "scene_end"
+    scene_end_var.type = 'SINGLE_PROP'
+    scene_end_var.targets[0].id_type = 'SCENE'
+    scene_end_var.targets[0].id = context.scene
+    scene_end_var.targets[0].data_path = 'frame_end'
 
     #----------------
     # Set up the constraints and drivers on the camera object.
@@ -293,7 +371,7 @@ def build_single_shake(camera, shake_item_index, collection, context):
     fcurve.keyframe_points.clear()
     driver = fcurve.driver
     driver.type = 'SCRIPTED'
-    driver.expression = "{} * influence * location_scale / unit_scale * int(\"1\")".format(1.0 / (UNIT_SCALE_MAX * INFLUENCE_MAX * SCALE_MAX))
+    driver.expression = "{} * influence * location_scale / unit_scale * int(use_loc)".format(1.0 / (UNIT_SCALE_MAX * INFLUENCE_MAX * SCALE_MAX))
     if "influence" not in driver.variables:
         var = driver.variables.new()
         var.name = "influence"
@@ -315,6 +393,13 @@ def build_single_shake(camera, shake_item_index, collection, context):
         var.targets[0].id_type = 'SCENE'
         var.targets[0].id = context.scene
         var.targets[0].data_path ='unit_settings.scale_length'
+    if "use_loc" not in driver.variables:
+        var = driver.variables.new()
+        var.name = "use_loc"
+        var.type = 'SINGLE_PROP'
+        var.targets[0].id_type = 'OBJECT'
+        var.targets[0].id = camera
+        var.targets[0].data_path = 'camera_shakes[{}].use_location'.format(shake_item_index)
 
     # Set up the rotation constraint driver.
     #
@@ -323,7 +408,7 @@ def build_single_shake(camera, shake_item_index, collection, context):
     fcurve.keyframe_points.clear()
     driver = fcurve.driver
     driver.type = 'SCRIPTED'
-    driver.expression = "influence * {}".format(1.0 / INFLUENCE_MAX)
+    driver.expression = "influence * {} * int(use_rot)".format(1.0 / INFLUENCE_MAX)
     if "influence" not in driver.variables:
         var = driver.variables.new()
         var.name = "influence"
@@ -331,6 +416,13 @@ def build_single_shake(camera, shake_item_index, collection, context):
         var.targets[0].id_type = 'OBJECT'
         var.targets[0].id = camera
         var.targets[0].data_path = 'camera_shakes[{}].influence'.format(shake_item_index)
+    if "use_rot" not in driver.variables:
+        var = driver.variables.new()
+        var.name = "use_rot"
+        var.type = 'SINGLE_PROP'
+        var.targets[0].id_type = 'OBJECT'
+        var.targets[0].id = camera
+        var.targets[0].data_path = 'camera_shakes[{}].use_rotation'.format(shake_item_index)
 
 
 # Only for use in rebuilding camera shakes, to ensure that constraints, etc.
@@ -454,6 +546,11 @@ def on_shake_type_update(shake_instance, context):
     rebuild_camera_shakes(shake_instance.id_data, context)
 
 
+def _shake_type_items(self, context):
+    presets = get_all_presets()
+    return [(id, get_display_name(id), "") for id in presets.keys()]
+
+
 #class ActionToPythonData(bpy.types.Operator):
 #    """Writes the action on the currently selected object to a text block as Python data"""
 #    bl_idname = "object.action_to_python_data"
@@ -569,14 +666,221 @@ class CameraShakifyPrepFileForFarm(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class CameraShakifyImportCOLMAP(bpy.types.Operator):
+    """Import COLMAP reconstruction as a new shake preset"""
+    bl_idname = "wm.camera_shakify_import_colmap"
+    bl_label = "Import COLMAP Shake"
+    bl_options = {'UNDO'}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        import math
+
+        path = self.filepath
+        if not path:
+            self.report({'ERROR'}, "No file selected")
+            return {'CANCELLED'}
+
+        # Check if it's a directory (scene folder) or images.txt
+        up_levels = 2
+        if os.path.isdir(path):
+            for cand in ["sparse/images.txt", "sparse/0/images.txt"]:
+                fp = os.path.join(path, cand)
+                if os.path.exists(fp):
+                    path = fp
+                    up_levels = cand.count(os.sep) + 1
+                    break
+            else:
+                self.report({'ERROR'}, f"No images.txt found in {path}/sparse/")
+                return {'CANCELLED'}
+
+        if not path.endswith("images.txt") or not os.path.exists(path):
+            self.report({'ERROR'}, f"File not found: {path}")
+            return {'CANCELLED'}
+
+        # Parse
+        def parse_images_txt(fp):
+            poses = []
+            with open(fp, 'r') as f:
+                lines = f.readlines()
+            i = 0
+            while i < len(lines) and lines[i].startswith('#'):
+                i += 1
+            while i < len(lines):
+                line = lines[i].strip()
+                if not line or line.startswith('#'):
+                    i += 1
+                    continue
+                parts = line.split()
+                qw, qx, qy, qz = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                tx, ty, tz = float(parts[5]), float(parts[6]), float(parts[7])
+                poses.append((qw, qx, qy, qz, tx, ty, tz))
+                i += 2
+            return poses
+
+        def quat_to_euler(qw, qx, qy, qz):
+            sr = 2.0 * (qw * qx + qy * qz)
+            cr = 1.0 - 2.0 * (qx * qx + qy * qy)
+            ex = math.atan2(sr, cr)
+            sp = 2.0 * (qw * qy - qz * qx)
+            ey = math.copysign(math.pi / 2, sp) if abs(sp) >= 1 else math.asin(sp)
+            sy = 2.0 * (qw * qz + qx * qy)
+            cy = 1.0 - 2.0 * (qy * qy + qz * qz)
+            ez = math.atan2(sy, cy)
+            return ex, ey, ez
+
+        def gauss_kernel(size, sigma):
+            k = [math.exp(-0.5 * (x / sigma) ** 2) for x in range(-size, size + 1)]
+            t = sum(k)
+            return [x / t for x in k]
+
+        def apply_kernel(data, kernel):
+            n, k, half = len(data), len(kernel), len(kernel) // 2
+            result = [0.0] * n
+            for i in range(n):
+                total = 0.0
+                for j in range(k):
+                    idx = i + j - half
+                    if idx < 0:
+                        idx = 0
+                    elif idx >= n:
+                        idx = n - 1
+                    total += data[idx] * kernel[j]
+                result[i] = total
+            return result
+
+        def lowpass(data, sigma):
+            ks = max(1, int(sigma * 3))
+            return apply_kernel(data, gauss_kernel(ks, sigma))
+
+        def bandpass(data, sl, sh):
+            a = lowpass(data, sl)
+            b = lowpass(data, sh)
+            return [a[i] - b[i] for i in range(len(data))]
+
+        def loop_fix(data):
+            """Force first == last by distributing a linear correction across all frames."""
+            n2 = len(data)
+            d = data[0] - data[-1]
+            return [data[i] - d + d * i / (n2 - 1) for i in range(n2)]
+
+        poses = parse_images_txt(path)
+        n = len(poses)
+
+        if n < 10:
+            self.report({'ERROR'}, f"Only {n} frames — need at least 10")
+            return {'CANCELLED'}
+
+        loc = [[p[4] for p in poses], [p[5] for p in poses], [p[6] for p in poses]]
+        eulers = [quat_to_euler(p[0], p[1], p[2], p[3]) for p in poses]
+        rot = [[e[0] for e in eulers], [e[1] for e in eulers], [e[2] for e in eulers]]
+
+        # Unwrap eulers
+        for axis_idx in range(3):
+            uw = [rot[axis_idx][0]]
+            for i in range(1, n):
+                d = rot[axis_idx][i] - uw[-1]
+                uw.append(rot[axis_idx][i] - round(d / (2 * math.pi)) * 2 * math.pi)
+            rot[axis_idx] = uw
+
+        # Processed version: bandpass + loop_fix, scaled to INVESTIGATION level
+        sl = max(5.0, n / 12.0)
+        sh = max(1.5, n / 80.0)
+
+        channels = {}
+        for ax in range(3):
+            bp = bandpass(loc[ax], sl, sh)
+            channels[('location', ax)] = [v * 1.8 for v in bp]
+        for ax in range(3):
+            bp = bandpass(rot[ax], sl, sh)
+            channels[('rotation_euler', ax)] = [v * 1.8 for v in bp]
+
+        # Scale location/rotation max to INVESTIGATION level
+        inv_data = SHAKE_LIST["INVESTIGATION"][2]
+        inv_loc_max = 0.0
+        inv_rot_max = 0.0
+        for ck, vals in inv_data.items():
+            m = max(abs(v[1]) for v in vals)
+            if ck[0] == 'location':
+                inv_loc_max = max(inv_loc_max, m)
+            else:
+                inv_rot_max = max(inv_rot_max, m)
+
+        for ck_type, inv_max in [('location', inv_loc_max), ('rotation_euler', inv_rot_max)]:
+            our_max = 0.0
+            for ax in range(3):
+                our_max = max(our_max, max(abs(v) for v in channels[(ck_type, ax)]))
+            if our_max > 0:
+                s = inv_max / our_max
+                for ax in range(3):
+                    channels[(ck_type, ax)] = [v * s for v in channels[(ck_type, ax)]]
+
+        for ck in list(channels.keys()):
+            channels[ck] = loop_fix(channels[ck])
+
+        # Generate key/name from folder
+        scene_path = path
+        for _ in range(up_levels):
+            scene_path = os.path.dirname(scene_path)
+        folder = os.path.basename(scene_path)
+        base_name = folder.replace("_", " ").title()
+        import os as _os
+        username = _os.environ.get('USERNAME', '')
+        user_tag = f" ({username})" if username else ""
+        name = base_name + user_tag
+        key = re.sub(r'[^a-zA-Z0-9_]', '_', folder).strip('_').upper()
+        while key in get_all_presets():
+            key += "_2"
+
+        # Format for storage
+        fmt_channels = {}
+        for ck in channels:
+            fmt_channels[ck] = [(i, round(channels[ck][i], 6)) for i in range(n)]
+
+        add_user_preset(key, name, 30.0, fmt_channels)
+
+        self.report({'INFO'}, f"Imported '{name}' ({n} frames) as '{key}'")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
+class CameraShakifyDeletePreset(bpy.types.Operator):
+    """Delete a user-imported shake preset (built-in presets are locked)"""
+    bl_idname = "wm.camera_shakify_delete_preset"
+    bl_label = "Delete Preset"
+    bl_options = {'UNDO'}
+
+    preset_key: bpy.props.StringProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        if is_builtin(self.preset_key):
+            self.report({'ERROR'}, f"Cannot delete built-in preset '{self.preset_key}'")
+            return {'CANCELLED'}
+        remove_user_preset(self.preset_key)
+        self.report({'INFO'}, f"Deleted preset '{self.preset_key}'")
+        return {'FINISHED'}
+
+
 # An actual instance of Camera shake added to a camera.
 #
-# IMPORTANT: when making changes here, make sure to also update the
-# corresponding script text in farm_script.py.
+# IMPORTANT: when making changes here (properties), make sure to also update
+# the corresponding class in farm_script.py.
 class CameraShakeInstance(bpy.types.PropertyGroup):
     shake_type: bpy.props.EnumProperty(
         name = "Shake Type",
-        items = [(id, SHAKE_LIST[id][0], "") for id in SHAKE_LIST.keys()],
+        items = _shake_type_items,
         options = set(), # Not animatable.
         override = set(), # Not library overridable.
         update = on_shake_type_update,
@@ -594,6 +898,16 @@ class CameraShakeInstance(bpy.types.PropertyGroup):
         default=1.0,
         min=0.0, max=SCALE_MAX,
         soft_min=0.0, soft_max=2.0,
+    )
+    use_location: bpy.props.BoolProperty(
+        name="Use Location",
+        description="Enable location (translation) shake",
+        default=True,
+    )
+    use_rotation: bpy.props.BoolProperty(
+        name="Use Rotation",
+        description="Enable rotation shake",
+        default=True,
     )
     use_manual_timing: bpy.props.BoolProperty(
         name="Manual Timing",
@@ -621,6 +935,77 @@ class CameraShakeInstance(bpy.types.PropertyGroup):
         precision=1,
         step=100.0,
     )
+    use_loop_range: bpy.props.BoolProperty(
+        name="Loop Range",
+        description="Resample the shake to the scene frame range and loop seamlessly (speed still applies, offset ignored)",
+        default=False,
+        update=lambda self, ctx: rebuild_camera_shakes(self.id_data, ctx),
+    )
+
+
+
+#========================================================
+
+
+class CameraShakifyRenamePreset(bpy.types.Operator):
+    """Rename a shake preset"""
+    bl_idname = "wm.camera_shakify_rename_preset"
+    bl_label = "Rename Preset"
+    bl_options = {'UNDO'}
+
+    preset_key: bpy.props.StringProperty(options={'HIDDEN'})
+    new_name: bpy.props.StringProperty(name="New Name")
+
+    def invoke(self, context, event):
+        self.new_name = get_display_name(self.preset_key)
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        new_name = self.new_name.strip()
+        if not new_name:
+            self.report({'ERROR'}, "Name cannot be empty")
+            return {'CANCELLED'}
+        set_display_name(self.preset_key, new_name)
+        return {'FINISHED'}
+
+
+class CameraShakifyResetNames(bpy.types.Operator):
+    """Reset all built-in preset names to their defaults"""
+    bl_idname = "wm.camera_shakify_reset_names"
+    bl_label = "Reset Default Names"
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        reset_display_names()
+        self.report({'INFO'}, "Preset names reset to defaults")
+        return {'FINISHED'}
+
+
+class CameraShakifyPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    def draw(self, context):
+        layout = self.layout
+        presets = get_all_presets()
+        user_presets = load_user_presets()
+
+        layout.label(text="Installed Shake Presets:")
+        box = layout.box()
+        for key in presets:
+            display_name = get_display_name(key)
+            row = box.row()
+            row.label(text=display_name)
+            row.operator("wm.camera_shakify_rename_preset", text="", icon='GREASEPENCIL').preset_key = key
+            if not is_builtin(key):
+                op = row.operator("wm.camera_shakify_delete_preset", text="", icon='X')
+                op.preset_key = key
+
+        if not user_presets:
+            row = box.row()
+            row.label(text="No user-imported presets yet. Use Import COLMAP in the camera Properties panel.", icon='INFO')
+
+        layout.separator()
+        layout.operator("wm.camera_shakify_reset_names", icon='LOOP_BACK')
 
 
 #========================================================
@@ -635,6 +1020,11 @@ def register():
     bpy.utils.register_class(CameraShakeMove)
     bpy.utils.register_class(CameraShakesFixGlobal)
     bpy.utils.register_class(CameraShakifyPrepFileForFarm)
+    bpy.utils.register_class(CameraShakifyImportCOLMAP)
+    bpy.utils.register_class(CameraShakifyDeletePreset)
+    bpy.utils.register_class(CameraShakifyRenamePreset)
+    bpy.utils.register_class(CameraShakifyResetNames)
+    bpy.utils.register_class(CameraShakifyPreferences)
 
     # # Only needed for creating new shakes to add to this addon. Not for end users.
     # bpy.utils.register_class(ActionToPythonData)
@@ -661,6 +1051,13 @@ def unregister():
     bpy.utils.unregister_class(CameraShakeMove)
     bpy.utils.unregister_class(CameraShakesFixGlobal)
     bpy.utils.unregister_class(CameraShakifyPrepFileForFarm)
+    bpy.utils.unregister_class(CameraShakifyImportCOLMAP)
+    bpy.utils.unregister_class(CameraShakifyDeletePreset)
+    bpy.utils.unregister_class(CameraShakifyResetNames)
+    bpy.utils.unregister_class(CameraShakifyRenamePreset)
+    bpy.utils.unregister_class(CameraShakifyPreferences)
+
+    del bpy.types.WindowManager.camera_shake_show_utils
 
     #bpy.utils.unregister_class(ActionToPythonData)
 

@@ -36,6 +36,16 @@ class CameraShakeInstance(bpy.types.PropertyGroup):
         min=0.0, max={scale_max},
         soft_min=0.0, soft_max=2.0,
     )
+    use_location: bpy.props.BoolProperty(
+        name="Use Location",
+        description="Enable location (translation) shake",
+        default=True,
+    )
+    use_rotation: bpy.props.BoolProperty(
+        name="Use Rotation",
+        description="Enable rotation shake",
+        default=True,
+    )
     use_manual_timing: bpy.props.BoolProperty(
         name="Manual Timing",
         description="Manually animate the progression of time through the camera shake animation",
@@ -62,7 +72,11 @@ class CameraShakeInstance(bpy.types.PropertyGroup):
         precision=1,
         step=100.0,
     )
-
+    use_loop_range: bpy.props.BoolProperty(
+        name="Loop Range",
+        description="Automatically fit one full shake loop to the scene frame range (speed still applies, offset ignored)",
+        default=False,
+    )
 if __name__ == "__main__":
     # Only register the property if it doesn't already exist.  This is to guard against replacing
     # the property with the stand-in class when the real one from the addon already exists.

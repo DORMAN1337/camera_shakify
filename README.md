@@ -1,20 +1,22 @@
-# Camera Shakify
+# Camera Shakify — Community Fork
 
-An addon for Blender that lets you easily add [realistic camera shake](https://youtu.be/4lCm_jqoBrI) to your cameras.
+A modified version of [Camera Shakify](https://github.com/EatTheFuture/camera_shakify) by Nathan Vegdahl & Ian Hubert.
 
-Versions 0.3.x and 0.4.x of this addon require Blender 4.2 or 4.3.
+## What's different
 
-Versions 0.5.0 or later require Blender 4.4 or later.
+- **Import shakes from COLMAP / GLOMAP** — add new presets directly from camera tracking data
+- **Rename or delete** custom presets in the addon properties
+- **Toggle location / rotation** independently per shake
+- **Loop Range** — seamlessly loop camera shake within your timeline range, so it wraps cleanly when animation restarts
 
-# License
+## Credits
 
-The code in this addon is licensed under the GNU General Public License, version 3.  Please see LICENSE_CODE.md for details.
+Original addon by [Nathan Vegdahl (cessen)](https://github.com/cessen) and [Ian Hubert](https://twitter.com/Mrdodobird).
 
-The camera shake data is [CC0](https://creativecommons.org/publicdomain/zero/1.0/).  Please see LICENSE_DATA.md for details.
+This version was completely vibe-coded, so sorry in advance if it destroys your project.
 
-# Contributing
+## License
 
-Although we are not specifically looking for contributions right now, if you would like to contribute please keep in mind the following things:
+The code in this addon is licensed under the GNU General Public License, version 3.  See LICENSE_CODE.md for details.
 
-- By submitting any work for inclusion in this addon, you agree to license it under the same terms as above, and you assert that you have the rights to do so.
-- Larger changes to the addon are likely to be rejected unless by pure coincidence they happen to align with our goals for the project.  So if you are considering a larger change, please either file an issue or otherwise contact us to discuss your idea before starting work on it, so that you don't inadvertantly waste your time.
+The camera shake data is [CC0](https://creativecommons.org/publicdomain/zero/1.0/).  See LICENSE_DATA.md for details.

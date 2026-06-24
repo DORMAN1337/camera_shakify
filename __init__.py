@@ -145,8 +145,6 @@ class CameraShakifyPanel(bpy.types.Panel):
             col.separator()
             col.operator("object.camera_shakes_fix_global")
             col.operator("wm.camera_shakify_prep_file_for_farm")
-            col.separator()
-            col.operator("wm.camera_shakify_uninstall", icon='CANCEL', text="Uninstall Shakify")
 
 
 class OBJECT_UL_camera_shake_items(bpy.types.UIList):
@@ -666,34 +664,6 @@ class CameraShakifyPrepFileForFarm(bpy.types.Operator):
     def execute(self, context):
         ensure_farm_script(INFLUENCE_MAX, SCALE_MAX)
         return {'FINISHED'}
-
-
-class CameraShakifyUninstall(bpy.types.Operator):
-    """Remove all shake data from the current file and delete the addon"""
-    bl_idname = "wm.camera_shakify_uninstall"
-    bl_label = "Uninstall Shakify"
-    bl_options = {'INTERNAL'}
-
-    @classmethod
-    def poll(cls, context):
-        return True
-
-    def execute(self, context):
-        addon_dir = os.path.dirname(__file__)
-        # Clean up shakes from current scene
-        fix_camera_shakes_globally(context)
-        # Write a batch script to delete the addon after Blender exits
-        bat_path = os.path.join(os.path.dirname(addon_dir), "uninstall_shakify.bat")
-        with open(bat_path, "w") as f:
-            f.write(f'@echo off\n')
-            f.write(f'timeout /t 2 /nobreak >nul\n')
-            f.write(f'rmdir /s /q "{addon_dir}"\n')
-            f.write(f'del "%~f0"\n')
-        self.report({'INFO'}, f"Scene cleaned. Save work, close Blender, then run the .bat file in the extensions folder.")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_confirm(self, event)
 
 
 class CameraShakifyImportCOLMAP(bpy.types.Operator):

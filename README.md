@@ -1,6 +1,6 @@
 # Camera Shakify — Community Fork
 
-A modified version of [Camera Shakify](https://github.com/EatTheFuture/camera_shakify) by Nathan Vegdahl & Ian Hubert. Adds COLMAP/GLOMAP import, and seamless loop range.
+A modified version of [Camera Shakify](https://github.com/EatTheFuture/camera_shakify) by Nathan Vegdahl & Ian Hubert. 
 
 ## What's different
 
